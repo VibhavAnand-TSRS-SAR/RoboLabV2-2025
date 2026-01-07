@@ -107,6 +107,15 @@ st.markdown(f"""
         border: 1px solid #e5e7eb; margin-bottom: 10px;
         box-shadow: 0 1px 3px rgba(0,0,0,0.05);
     }}
+    
+    .category-tag {{
+        display: inline-block;
+        padding: 5px 12px;
+        margin: 3px;
+        border-radius: 15px;
+        background: #e5e7eb;
+        font-size: 14px;
+    }}
 </style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 """, unsafe_allow_html=True)
@@ -183,7 +192,31 @@ def init_db():
                  total_items INTEGER,
                  mode TEXT,
                  justification TEXT)''')
+    
+    # NEW: Categories Table
+    c.execute('''CREATE TABLE IF NOT EXISTS categories (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT UNIQUE NOT NULL,
+                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP)''')
 
+    # Seed default categories if empty
+    c.execute("SELECT count(*) FROM categories")
+    if c.fetchone()[0] == 0:
+        default_categories = ["Sensors", "Motors", "Microcontrollers", "Power", "Tools", "Passive", "Others"]
+        for cat in default_categories:
+            c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat,))
+        conn.commit()
+    
+    # Migrate: Add categories from existing inventory items
+    c.execute("SELECT DISTINCT category FROM inventory WHERE category IS NOT NULL AND category != ''")
+    existing_cats = c.fetchall()
+    for cat_row in existing_cats:
+        cat_name = cat_row[0]
+        if cat_name:
+            c.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat_name,))
+    conn.commit()
+
+    # Seed Roles
     c.execute("SELECT count(*) FROM roles")
     if c.fetchone()[0] == 0:
         all_perms = json.dumps(["Dashboard", "Inventory", "Stock Operations", "Reports", "Procurement List", "User Management", "Audit Logs", "Settings"])
@@ -204,6 +237,7 @@ def init_db():
                 c.execute("UPDATE roles SET permissions = ? WHERE name = ?", (json.dumps(perms), role[0]))
         conn.commit()
 
+    # Seed Users
     c.execute("SELECT count(*) FROM users")
     if c.fetchone()[0] == 0:
         c.execute("INSERT INTO users (emp_id, name, password, role) VALUES (?, ?, ?, ?)", ('admin', 'System Admin', 'admin123', 'admin'))
@@ -282,6 +316,31 @@ def generate_po_number():
     
     po_number = f"TSRS/RoboLab/PO/{academic_year}/PO{count:04d}"
     return po_number
+
+# --- CATEGORY HELPER ---
+def get_categories():
+    """Get all categories from database"""
+    cats = run_query("SELECT name FROM categories ORDER BY name", fetch=True)
+    return [c['name'] for c in cats] if cats else ["Others"]
+
+def add_category(name):
+    """Add a new category if it doesn't exist"""
+    if name and name.strip():
+        name = name.strip()
+        run_query("INSERT OR IGNORE INTO categories (name) VALUES (?)", (name,))
+        return True
+    return False
+
+def add_categories_from_list(category_list):
+    """Add multiple categories from a list (used in bulk upload)"""
+    added = 0
+    for cat in category_list:
+        if cat and str(cat).strip() and str(cat).lower() != 'nan':
+            cat_name = str(cat).strip()
+            result = run_query("INSERT OR IGNORE INTO categories (name) VALUES (?)", (cat_name,))
+            if result:
+                added += 1
+    return added
 
 # --- VIEWS ---
 
@@ -469,13 +528,32 @@ def landing_page():
 
     st.markdown("<div class='footer'>Created by <b>Blackquest</b></div>", unsafe_allow_html=True)
 
+# --- INVENTORY VIEW WITH DYNAMIC CATEGORIES ---
 def view_inventory():
     st.title("📦 Inventory Management")
     
-    tab1, tab2, tab3 = st.tabs(["🔎 View", "➕ Add Item", "📂 Bulk Upload"])
+    tab1, tab2, tab3, tab4 = st.tabs(["🔎 View", "➕ Add Item", "📂 Bulk Upload", "🏷️ Manage Categories"])
+    
+    # Get current categories
+    categories = get_categories()
     
     with tab1:
         df = pd.read_sql_query("SELECT * FROM inventory", get_db_connection())
+        
+        # Filter by category
+        col_filter, col_search = st.columns([1, 2])
+        with col_filter:
+            filter_cat = st.selectbox("Filter by Category", ["All"] + categories, key="filter_cat")
+        with col_search:
+            search_term = st.text_input("Search Items", placeholder="Type to search...")
+        
+        # Apply filters
+        if not df.empty:
+            if filter_cat != "All":
+                df = df[df['category'] == filter_cat]
+            if search_term:
+                df = df[df['name'].str.contains(search_term, case=False, na=False)]
+        
         st.dataframe(df, use_container_width=True)
         
         if st.session_state.user['role'] == 'admin' and not df.empty:
@@ -489,7 +567,7 @@ def view_inventory():
     with tab2:
         with st.form("add_i"):
             n = st.text_input("Name")
-            c = st.selectbox("Category", ["Sensors", "Motors", "Microcontrollers", "Power", "Tools", "Others"])
+            c = st.selectbox("Category", categories)
             q = st.number_input("Quantity", 0)
             ms = st.number_input("Min Stock", 5)
             p = st.number_input("Price", 0.0)
@@ -503,23 +581,105 @@ def view_inventory():
 
     with tab3:
         st.markdown("**Upload Excel (.xlsx)** with columns: `name`, `category`, `quantity`, `price`, `min_stock`, `location`")
+        st.info("💡 New categories in the Excel file will be automatically added to the system.")
+        
         uploaded_file = st.file_uploader("Choose File", type=['xlsx'])
         
         if uploaded_file:
             df_upload = pd.read_excel(uploaded_file)
             st.dataframe(df_upload.head())
             
+            # Show new categories that will be added
+            if 'category' in [col.lower() for col in df_upload.columns]:
+                cat_col = [col for col in df_upload.columns if col.lower() == 'category'][0]
+                new_cats = df_upload[cat_col].dropna().unique().tolist()
+                existing_cats = get_categories()
+                truly_new = [c for c in new_cats if c not in existing_cats]
+                
+                if truly_new:
+                    st.warning(f"🆕 New categories will be added: {', '.join(truly_new)}")
+            
             if st.button("Confirm Import"):
                 count = 0
+                new_categories = set()
+                
                 for _, row in df_upload.iterrows():
                     row_lower = {k.lower(): v for k, v in row.items()}
                     if 'name' in row_lower and pd.notna(row_lower['name']):
+                        cat = row_lower.get('category', 'Others')
+                        if pd.isna(cat) or not cat:
+                            cat = 'Others'
+                        
+                        # Track new categories
+                        new_categories.add(str(cat))
+                        
                         run_query("INSERT INTO inventory (name, category, quantity, min_stock, price, location) VALUES (?,?,?,?,?,?)", 
-                                  (row_lower['name'], row_lower.get('category', 'Others'), row_lower.get('quantity', 0), row_lower.get('min_stock', 5), row_lower.get('price', 0.0), row_lower.get('location', 'Unknown')))
+                                  (row_lower['name'], cat, row_lower.get('quantity', 0), row_lower.get('min_stock', 5), row_lower.get('price', 0.0), row_lower.get('location', 'Unknown')))
                         count += 1
-                log_activity("Bulk Upload", f"Imported {count} items")
+                
+                # Add new categories to database
+                added_cats = add_categories_from_list(new_categories)
+                
+                log_activity("Bulk Upload", f"Imported {count} items, {added_cats} new categories")
                 st.success(f"Imported {count} items!")
+                if added_cats > 0:
+                    st.info(f"Added {added_cats} new categories to the system.")
                 st.rerun()
+
+    # NEW: Manage Categories Tab
+    with tab4:
+        st.subheader("🏷️ Category Management")
+        
+        # Display current categories
+        st.markdown("**Current Categories:**")
+        current_cats = get_categories()
+        
+        # Show as tags
+        tags_html = "".join([f"<span class='category-tag'>{cat}</span>" for cat in current_cats])
+        st.markdown(f"<div>{tags_html}</div>", unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # Add new category
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            new_cat = st.text_input("New Category Name", placeholder="e.g., Displays, Cables, etc.")
+        with col2:
+            st.write("")
+            st.write("")
+            if st.button("➕ Add Category", use_container_width=True):
+                if new_cat and new_cat.strip():
+                    if new_cat.strip() in current_cats:
+                        st.error("Category already exists!")
+                    else:
+                        add_category(new_cat.strip())
+                        log_activity("Category", f"Added category: {new_cat.strip()}")
+                        st.success(f"Added category: {new_cat.strip()}")
+                        st.rerun()
+                else:
+                    st.error("Please enter a category name.")
+        
+        st.markdown("---")
+        
+        # Delete category (Admin only)
+        if st.session_state.user['role'] == 'admin':
+            with st.expander("🗑️ Delete Category", expanded=False):
+                st.warning("⚠️ Deleting a category will NOT delete items in that category. They will retain their category label.")
+                
+                del_cat = st.selectbox("Select Category to Delete", current_cats)
+                
+                # Check if category is in use
+                items_in_cat = run_query("SELECT COUNT(*) as cnt FROM inventory WHERE category = ?", (del_cat,), fetch=True)
+                item_count = items_in_cat[0]['cnt'] if items_in_cat else 0
+                
+                if item_count > 0:
+                    st.info(f"ℹ️ This category has {item_count} items.")
+                
+                if st.button("Delete Category", type="secondary"):
+                    run_query("DELETE FROM categories WHERE name = ?", (del_cat,))
+                    log_activity("Category", f"Deleted category: {del_cat}")
+                    st.success(f"Deleted category: {del_cat}")
+                    st.rerun()
 
 def view_stock_ops():
     st.title("🔄 Stock Operations")
@@ -592,11 +752,10 @@ def view_stock_ops():
                 </div>
             """, unsafe_allow_html=True)
 
-# --- REVAMPED PROCUREMENT LIST ---
+# --- PROCUREMENT LIST ---
 def view_procurement():
     st.title("🛒 Procurement List")
     
-    # Initialize session state
     if 'procurement_step' not in st.session_state:
         st.session_state.procurement_step = 1
     if 'selected_items' not in st.session_state:
@@ -623,7 +782,6 @@ def view_procurement():
         
         st.markdown("---")
         
-        # STEP 1: Select Items
         if step == 1:
             st.subheader("Step 1: Select Items for Procurement")
             
@@ -669,20 +827,17 @@ def view_procurement():
                 if st.button("Proceed to Details ➡️", type="primary", use_container_width=True):
                     if len(selected) > 0:
                         st.session_state.selected_items = selected
-                        # Initialize justifications dict
                         st.session_state.item_justifications = {item['name']: "" for item in selected}
                         st.session_state.procurement_step = 2
                         st.rerun()
                     else:
                         st.error("Please select at least one item.")
         
-        # STEP 2: Fill Details
         elif step == 2:
             st.subheader("Step 2: Fill Procurement Details")
             
             selected_items = st.session_state.selected_items
             
-            # Global Settings
             st.markdown("### 📋 General Information")
             col1, col2 = st.columns(2)
             with col1:
@@ -711,7 +866,6 @@ def view_procurement():
             
             if st.button("✅ Apply to All Items", type="secondary"):
                 st.session_state.global_justification = global_just
-                # Apply to all items
                 for item in selected_items:
                     st.session_state.item_justifications[item['name']] = global_just
                 st.success("Justification applied to all items!")
@@ -732,7 +886,6 @@ def view_procurement():
                         else:
                             link = "N/A"
                     
-                    # Get justification from session state
                     current_just = st.session_state.item_justifications.get(item['name'], "")
                     justification = st.text_area(
                         "Justification", 
@@ -740,7 +893,6 @@ def view_procurement():
                         key=f"just_{idx}", 
                         height=80
                     )
-                    # Update session state
                     st.session_state.item_justifications[item['name']] = justification
                     
                     item_details.append({
@@ -774,7 +926,6 @@ def view_procurement():
                     st.session_state.procurement_step = 3
                     st.rerun()
         
-        # STEP 3: Preview
         elif step == 3:
             st.subheader("Step 3: Preview Procurement Request")
             
@@ -790,7 +941,6 @@ def view_procurement():
                 </div>
             """, unsafe_allow_html=True)
             
-            # Preview Table with all columns including Justification
             preview_df = pd.DataFrame(details['items'])
             st.dataframe(preview_df, use_container_width=True)
             
@@ -828,7 +978,6 @@ def view_procurement():
                     st.session_state.procurement_step = 4
                     st.rerun()
         
-        # STEP 4: Download
         elif step == 4:
             st.subheader("Step 4: Download Procurement Request")
             
@@ -844,13 +993,11 @@ def view_procurement():
                 </div>
             """, unsafe_allow_html=True)
             
-            # Create Excel with all details including Justification
             items_df = pd.DataFrame(details['items'])
             items_df.insert(0, 'PO Number', po_number)
             items_df['Requested By'] = details['requested_by']
             items_df['Required By'] = details['required_by']
             
-            # Reorder columns for better readability
             column_order = [
                 'PO Number', 'Item Name', 'Category', 'Current Stock', 'Min Stock',
                 'Quantity Requested', 'Unit Price', 'Estimated Cost', 'Justification',
@@ -882,7 +1029,6 @@ def view_procurement():
                 st.session_state.item_justifications = {}
                 st.rerun()
     
-    # History Tab
     with tab_history:
         st.subheader("📋 Purchase Order History")
         
@@ -908,7 +1054,6 @@ def view_procurement():
                     
                     col_dl, col_del = st.columns([3, 1])
                     
-                    # Re-download option
                     with col_dl:
                         if po['items_json']:
                             items_df = pd.DataFrame(items)
@@ -925,7 +1070,6 @@ def view_procurement():
                                 key=f"dl_{po['id']}"
                             )
                     
-                    # Delete option
                     with col_del:
                         if st.button(f"🗑️ Delete", key=f"del_{po['id']}", type="secondary"):
                             run_query("DELETE FROM purchase_orders WHERE id = ?", (po['id'],))
