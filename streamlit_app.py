@@ -439,11 +439,11 @@ def landing_page():
         </div>
     """, unsafe_allow_html=True)
 
-# --- INVENTORY VIEW WITH BULK UPLOAD ---
+# --- INVENTORY VIEW WITH BULK UPLOAD (EXCEL) ---
 def view_inventory():
     st.title("📦 Inventory Management")
     
-    tab1, tab2, tab3 = st.tabs(["🔎 View Inventory", "➕ Add Single Item", "📂 Bulk Upload (CSV)"])
+    tab1, tab2, tab3 = st.tabs(["🔎 View Inventory", "➕ Add Single Item", "📂 Bulk Upload (Excel)"])
     
     # 1. VIEW TAB
     with tab1:
@@ -476,47 +476,53 @@ def view_inventory():
                 time.sleep(1)
                 st.rerun()
 
-    # 3. UPLOAD TAB (NEW)
+    # 3. UPLOAD TAB (EXCEL)
     with tab3:
-        st.subheader("Import Data via CSV")
+        st.subheader("Import Data via Excel")
         st.markdown("""
         **Instructions:**
-        1. Upload a `.csv` file.
+        1. Upload a `.xlsx` file.
         2. Required Columns: `name`, `category`, `quantity`, `price`
         3. Optional Columns: `min_stock`, `location`
         """)
         
-        uploaded_file = st.file_uploader("Choose CSV File", type=['csv'])
+        uploaded_file = st.file_uploader("Choose Excel File", type=['xlsx'])
         
         if uploaded_file:
             try:
-                df_upload = pd.read_csv(uploaded_file)
+                # Read Excel
+                df_upload = pd.read_excel(uploaded_file)
                 st.write("Preview:")
                 st.dataframe(df_upload.head())
+                
+                # Check column headers (case insensitive handling)
+                cols = [c.lower() for c in df_upload.columns]
                 
                 if st.button("Confirm Import"):
                     count = 0
                     for index, row in df_upload.iterrows():
-                        # Basic validation
-                        if 'name' in row and pd.notna(row['name']):
-                            name = row['name']
-                            cat = row.get('category', 'Others')
-                            qty = row.get('quantity', 0)
-                            price = row.get('price', 0.0)
-                            ms = row.get('min_stock', 5)
-                            loc = row.get('location', 'Unknown')
+                        # Normalize row keys to lowercase for matching
+                        row_lower = {k.lower(): v for k, v in row.items()}
+                        
+                        if 'name' in row_lower and pd.notna(row_lower['name']):
+                            name = row_lower['name']
+                            cat = row_lower.get('category', 'Others')
+                            qty = row_lower.get('quantity', 0)
+                            price = row_lower.get('price', 0.0)
+                            ms = row_lower.get('min_stock', 5)
+                            loc = row_lower.get('location', 'Unknown')
                             
-                            # Insert
+                            # Insert into DB
                             run_query("INSERT INTO inventory (name, category, quantity, min_stock, price, location) VALUES (?,?,?,?,?,?)", 
                                       (name, cat, qty, ms, price, loc))
                             count += 1
                     
-                    log_activity("Bulk Upload", f"Imported {count} items via CSV")
-                    st.success(f"Successfully imported {count} items!")
+                    log_activity("Bulk Upload", f"Imported {count} items via Excel")
+                    st.success(f"Successfully added {count} items to the database.")
                     time.sleep(2)
                     st.rerun()
             except Exception as e:
-                st.error(f"Error reading CSV: {e}")
+                st.error(f"Error reading Excel file: {e}")
 
 def view_stock_ops():
     st.title("🔄 Stock Operations")
