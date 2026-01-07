@@ -378,7 +378,17 @@ def view_profile():
             
             name = c1.text_input("Full Name", value=curr['name'])
             password = c2.text_input("New Password (Optional)", type="password")
-            dob = c1.date_input("Date of Birth", value=datetime.strptime(curr['dob'], '%Y-%m-%d') if curr['dob'] else None)
+            
+            # BUG FIX: Handle invalid date formats from DB
+            dob_val = None
+            if curr['dob']:
+                try:
+                    dob_val = datetime.strptime(curr['dob'], '%Y-%m-%d')
+                except (ValueError, TypeError):
+                    dob_val = None
+
+            dob = c1.date_input("Date of Birth", value=dob_val)
+            
             gender = c2.selectbox("Gender", ["Male", "Female", "Other"], index=["Male", "Female", "Other"].index(curr['gender']) if curr['gender'] in ["Male", "Female", "Other"] else 0)
             phone = c1.text_input("Phone", value=curr['phone'] if curr['phone'] else "")
             address = c2.text_area("Address", value=curr['address'] if curr['address'] else "")
